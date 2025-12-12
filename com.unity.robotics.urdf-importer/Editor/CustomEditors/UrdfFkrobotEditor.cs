@@ -12,29 +12,65 @@ namespace Unity.Robotics.UrdfImporter.Editor
 
         private SerializedProperty currentAngles;
         private SerializedProperty rotationMatrix;
+        private SerializedProperty autoComputeDH;
+        private SerializedProperty dhParametersAsset;
+        private SerializedProperty showFKGizmo;
+        private SerializedProperty visualizationSphere;
+        private SerializedProperty gizmoSize;
 
         private void OnEnable()
         {
             currentAngles = serializedObject.FindProperty("currentAngles");
             rotationMatrix = serializedObject.FindProperty("endEffectorPosition");
+            autoComputeDH = serializedObject.FindProperty("autoComputeDH");
+            dhParametersAsset = serializedObject.FindProperty("dhParametersAsset");
+            showFKGizmo = serializedObject.FindProperty("showFKGizmo");
+            visualizationSphere = serializedObject.FindProperty("visualizationSphere");
+            gizmoSize = serializedObject.FindProperty("gizmoSize");
         }
         public override void OnInspectorGUI()
         {
             fkrobot = (FKRobot)target;
 
             serializedObject.Update();
+
+            // DH Parameter Configuration
+            EditorGUILayout.PropertyField(autoComputeDH);
+            EditorGUILayout.PropertyField(dhParametersAsset);
+
+            GUILayout.Space(10);
+
+            // FK Visualization
+            EditorGUILayout.PropertyField(showFKGizmo);
+            EditorGUILayout.PropertyField(visualizationSphere);
+            EditorGUILayout.PropertyField(gizmoSize);
+
+            GUILayout.Space(10);
+
+            // Current State (Read-only)
             EditorGUILayout.PropertyField(currentAngles);
             EditorGUILayout.PropertyField(rotationMatrix);
+
             serializedObject.ApplyModifiedProperties();
 
-            GUILayout.Space(5);
-            if (GUILayout.Button("Add DH Parameters"))
+            GUILayout.Space(10);
+
+            // Manual DH Parameter Entry
+            bool disableManualEntry = fkrobot.autoComputeDH || fkrobot.dhParametersAsset != null;
+            EditorGUI.BeginDisabledGroup(disableManualEntry);
+            if (GUILayout.Button("Add DH Parameters Manually"))
             {
                 AddDhParameterWindow window = (AddDhParameterWindow)EditorWindow.GetWindow(typeof(AddDhParameterWindow));
                 window.script = fkrobot;
                 window.minSize = new Vector2(500, 200);
                 window.GetEditorPrefs();
                 window.Show();
+            }
+            EditorGUI.EndDisabledGroup();
+
+            if (disableManualEntry)
+            {
+                EditorGUILayout.HelpBox("Manual entry is disabled when Auto Compute DH or DH Parameters Asset is set.", MessageType.Info);
             }
         }
 

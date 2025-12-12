@@ -20,8 +20,11 @@ namespace Unity.Robotics.UrdfImporter.Editor
 
         public void OnGUI()
         {
-            
-            GUILayout.Space(10);
+            if (script == null)
+            {
+                EditorGUILayout.HelpBox("No FKRobot script assigned. Please close this window and try again.", MessageType.Error);
+                return;
+            }
 
             GUILayout.Space(10);
             alpha = EditorGUILayout.FloatField("Alpha", alpha);
@@ -35,6 +38,13 @@ namespace Unity.Robotics.UrdfImporter.Editor
 
             if (GUILayout.Button("Add DH Parameter"))
             {
+                if (script == null || script.dh == null || script.jointChain == null)
+                {
+                    EditorUtility.DisplayDialog("Script Error",
+                        "FKRobot script or its components are not initialized", "Ok");
+                    return;
+                }
+
                 if (script.dh.Count >= script.jointChain.Count)
                 {
                     EditorUtility.DisplayDialog("Articulation Error",
@@ -63,7 +73,10 @@ namespace Unity.Robotics.UrdfImporter.Editor
             {
                 alpha = a = theta = d = float.NaN;
 
-                script.dh.Clear();
+                if (script != null && script.dh != null)
+                {
+                    script.dh.Clear();
+                }
                 dhDisplay = "";
                 count = 0;
             }
