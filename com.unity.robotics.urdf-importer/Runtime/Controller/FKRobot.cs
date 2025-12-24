@@ -21,9 +21,7 @@ namespace Unity.Robotics.UrdfImporter.Control{
         public const string k_TagName = "robot";
 
         [Header("DH Parameter Configuration")]
-        public bool autoComputeDH = false;
-
-        [Tooltip("Optional: ScriptableObject containing pre-defined DH parameters")]
+        [Tooltip("ScriptableObject containing DH parameters")]
         public RobotDHParameters dhParametersAsset;
 
         [Header("FK Visualization")]
@@ -55,15 +53,10 @@ namespace Unity.Robotics.UrdfImporter.Control{
                     jointChain.Add(joint);
             }
 
-            // Priority 1: Load from ScriptableObject if provided
+            // Load from ScriptableObject if provided
             if (LoadDHParametersFromAsset())
             {
                 Debug.Log("FKRobot: Loaded DH parameters from ScriptableObject");
-            }             
-            // Priority 2: Auto-compute if enabled and no parameters set
-            else if (autoComputeDH && (dh == null || dh.Count == 0))
-            {
-                AutoPopulateDHParameters();
             }
         }
 
@@ -88,11 +81,62 @@ namespace Unity.Robotics.UrdfImporter.Control{
 
         void FixedUpdate()
         {
-            if (dh.Count == jointChain.Count)
+            // Test angles: q_init = [-π/2, -π/2, π/2, π/2, -π/2, π/2]
+            List<float> testAngles = new List<float>
             {
-                FK();
+                -Mathf.PI / 2f,
+                -Mathf.PI / 2f,
+                 Mathf.PI / 2f,
+                 Mathf.PI / 2f,
+                -Mathf.PI / 2f,
+                 Mathf.PI / 2f
+            };
+
+            FK(testAngles);
+            UpdateVisualizationSphere();
+        }
+
+        /// <summary>
+        /// Updates the visualization sphere position to match the FK-calculated end-effector position.
+        /// Converts from FLU coordinate space to Unity coordinate space for proper visualization.
+        /// </summary>
+        private void UpdateVisualizationSphere()
+        {
+            if (visualizationSphere != null && endEffectorPosition != Matrix4x4.zero)
+            {
+                // Extract FK position in FLU coordinate space
+                Vector3 fkPositionFLU = new Vector3(
+                    endEffectorPosition.m03,
+                    endEffectorPosition.m13,
+                    endEffectorPosition.m23
+                );
+
+                // Convert from FLU to Unity coordinates
+                Vector3 fkPosition = FLUToUnity(fkPositionFLU);
+
+                // Position the visualization sphere at the FK-calculated end-effector position
+                visualizationSphere.transform.position = fkPosition;
+
+                // Optionally, also update rotation to match FK-calculated orientation
+                Vector3 xAxisFLU = new Vector3(endEffectorPosition.m00, endEffectorPosition.m10, endEffectorPosition.m20);
+                Vector3 yAxisFLU = new Vector3(endEffectorPosition.m01, endEffectorPosition.m11, endEffectorPosition.m21);
+                Vector3 zAxisFLU = new Vector3(endEffectorPosition.m02, endEffectorPosition.m12, endEffectorPosition.m22);
+
+                Vector3 xAxis = FLUToUnity(xAxisFLU);
+                Vector3 yAxis = FLUToUnity(yAxisFLU);
+                Vector3 zAxis = FLUToUnity(zAxisFLU);
+
+                // Construct rotation matrix in Unity space
+                Matrix4x4 rotationMatrix = new Matrix4x4();
+                rotationMatrix.SetColumn(0, new Vector4(xAxis.x, xAxis.y, xAxis.z, 0));
+                rotationMatrix.SetColumn(1, new Vector4(yAxis.x, yAxis.y, yAxis.z, 0));
+                rotationMatrix.SetColumn(2, new Vector4(zAxis.x, zAxis.y, zAxis.z, 0));
+                rotationMatrix.SetColumn(3, new Vector4(0, 0, 0, 1));
+
+                visualizationSphere.transform.rotation = rotationMatrix.rotation;
             }
         }
+
 
         /// <summary>
         /// Returns a homogenous transform which moves the end effector co-ordinate system to the world co-ordinate system
@@ -102,42 +146,66 @@ namespace Unity.Robotics.UrdfImporter.Control{
         public Matrix4x4 FK(List<float> angles = null)
         {
             currentAngles = currentJointParameters();
+
+            List<float[]> dhWithJoints;
             if (angles == null)
             {
-                PopulateDHparameters(currentAngles);
+                dhWithJoints = PopulateDHparameters(currentAngles);
             }
             else
             {
-                PopulateDHparameters(angles);
+                dhWithJoints = PopulateDHparameters(angles);
             }
-            endEffectorPosition = Matrix4x4.identity;
-            for (int i = 0; i < dh.Count; i++)
+
+            // Use first articulation body as base position for FK calculations
+            ArticulationBody baseJoint = jointChain[0];
+
+            Matrix4x4 baseTransform = GetBaseFLUTransform(baseJoint.transform);
+
+            endEffectorPosition = baseTransform;
+
+            for (int i = 0; i < dhWithJoints.Count; i++)
             {
-                Matrix4x4 temp = FWDMatrix2(dh[i]).transpose;
-                endEffectorPosition = endEffectorPosition * (FWDMatrix2(dh[i]).transpose);
+                endEffectorPosition = endEffectorPosition * (FWDMatrix2(dhWithJoints[i]).transpose);
             }
 
             return endEffectorPosition;
-        
+
         }
 
         /// <summary>
-        /// Modifies the DH parameters with the current joint positions from the robot in Unity Simulation
+        /// Creates a copy of the DH parameters with current joint positions added.
+        /// For revolute joints: Theta_total = Theta_dh + Theta_joint
+        /// For prismatic joints: d_total = d_dh + d_joint
         /// JointPostition: 0-2: rotation along XYZ axis 3-5: Translation along XYZ co-ordinates
         /// https://docs.unity3d.com/2020.1/Documentation/ScriptReference/ArticulationBody-jointPosition.html
         /// </summary>
         /// <param name="angles">List of float numbers representing joint poistions of a robot in meters or radians</param>
-        public void PopulateDHparameters(List<float> angles)
+        /// <returns>Deep copy of DH parameters with joint values added</returns>
+        public List<float[]> PopulateDHparameters(List<float> angles)
         {
-            for (int i = 0; i < jointChain.Count; i++)
+            // Create a deep copy of the DH parameters
+            List<float[]> dhCopy = new List<float[]>();
+            for (int i = 0; i < dh.Count; i++)
             {
+                dhCopy.Add((float[])dh[i].Clone());
+            }
+
+            // Iterate over DH parameters, updating with joint values where available
+            for (int i = 0; i < dh.Count; i++)
+            {
+                if (i >= jointChain.Count)
+                    break;
+
                 if (jointChain[i].jointType == ArticulationJointType.RevoluteJoint)
                 {
-                    dh[i][revoluteJointVariable] = jointChain[i].jointPosition[0];
+                    // Add joint position to existing theta parameter
+                    dhCopy[i][revoluteJointVariable] += jointChain[i].jointPosition[0];
                 }
                 else if (jointChain[i].jointType == ArticulationJointType.PrismaticJoint)
                 {
-                    dh[i][prismaticJointVariable] = jointChain[i].jointPosition[3];
+                    // Add joint position to existing d parameter
+                    dhCopy[i][prismaticJointVariable] += jointChain[i].jointPosition[3];
                 }
                 else
                 {
@@ -145,7 +213,7 @@ namespace Unity.Robotics.UrdfImporter.Control{
                 }
             }
 
-
+            return dhCopy;
         }
 
         public List<float> currentJointParameters()
@@ -187,28 +255,116 @@ namespace Unity.Robotics.UrdfImporter.Control{
                                 new Vector4(0, 0, 0, 1));
         }
 
+        /// <summary>
+        /// Converts a vector from FLU coordinate space to Unity coordinate space.
+        /// FLU: X=forward, Y=left, Z=up -> Unity: X=right, Y=up, Z=forward
+        /// </summary>
+        private Vector3 FLUToUnity(Vector3 fluVector)
+        {
+            // Unity.X = -FLU.Y, Unity.Y = FLU.Z, Unity.Z = FLU.X
+            return new Vector3(-fluVector.y, fluVector.z, fluVector.x);
+        }
+
+        /// <summary>
+        /// Converts a vector from Unity coordinate space to FLU coordinate space.
+        /// Unity: X=right, Y=up, Z=forward -> FLU: X=forward, Y=left, Z=up
+        /// </summary>
+        private Vector3 UnityToFLU(Vector3 unityVector)
+        {
+            // FLU.X = Unity.Z, FLU.Y = -Unity.X, FLU.Z = Unity.Y
+            return new Vector3(unityVector.z, -unityVector.x, unityVector.y);
+        }
+
+        /// <summary>copy
+        /// Creates the base frame transformation matrix in FLU coordinate space.
+        /// Converts the base joint position from Unity to FLU and creates a translation matrix.
+        /// </summary>
+        /// <param name="baseJointTransform">The transform of the base joint</param>
+        /// <returns>Base transformation matrix in FLU space</returns>
+        private Matrix4x4 GetBaseFLUTransform(Transform baseJointTransform)
+        {
+            // Convert base position from Unity to FLU coordinates
+            Vector3 basePosFLU = UnityToFLU(baseJointTransform.position);
+
+            // Create translation matrix in FLU space
+            return Matrix4x4.Translate(basePosFLU);
+        }
+
         private void OnDrawGizmos()
         {
-            if (showFKGizmo && robot != null)
+            if (showFKGizmo && robot != null && jointChain != null && jointChain.Count > 0)
             {
-                // Draw base frame
-                Vector3 basePosition = robot.transform.position;
+                // Draw FLU origin coordinate frame
+                Vector3 fluOrigin = FLUToUnity(Vector3.zero);
+                Vector3 fluOriginXAxis = FLUToUnity(new Vector3(1, 0, 0)) * gizmoSize * 3;
+                Vector3 fluOriginYAxis = FLUToUnity(new Vector3(0, 1, 0)) * gizmoSize * 3;
+                Vector3 fluOriginZAxis = FLUToUnity(new Vector3(0, 0, 1)) * gizmoSize * 3;
+
+                Gizmos.color = Color.red;
+                Gizmos.DrawLine(fluOrigin, fluOrigin + fluOriginXAxis);
+                Gizmos.color = Color.green;
+                Gizmos.DrawLine(fluOrigin, fluOrigin + fluOriginYAxis);
+                Gizmos.color = Color.blue;
+                Gizmos.DrawLine(fluOrigin, fluOrigin + fluOriginZAxis);
+
+#if UNITY_EDITOR
+                Handles.Label(fluOrigin + Vector3.up * gizmoSize * 0.5f, "Origin", new GUIStyle {
+                    normal = new GUIStyleState { textColor = Color.white },
+                    fontSize = 12,
+                    fontStyle = FontStyle.Bold
+                });
+#endif
+
+                // Use first articulation body as base position for FK calculations
+                ArticulationBody baseJoint = jointChain[0];
+
+                Matrix4x4 baseTransform = GetBaseFLUTransform(baseJoint.transform);
+                Matrix4x4 accumulatedTransformFLU = baseTransform;
+
+
+                // Extract position in FLU coordinate space and convert to Unity
+                Vector3 basePositionFLU = new Vector3(
+                    accumulatedTransformFLU.m03,
+                    accumulatedTransformFLU.m13,
+                    accumulatedTransformFLU.m23
+                );
+
+                Vector3 basePosition = FLUToUnity(basePositionFLU);
+
+#if UNITY_EDITOR
+                // Display debug info as labels in scene view
+                string debugInfo = $"Base Joint Unity Pos: {baseJoint.transform.position}\n" +
+                                   $"Base Pos FLU: {basePositionFLU}\n" +
+                                   $"Base Pos (Unity): {basePosition}\n" +
+                                   $"BaseTransform m03,m13,m23: ({baseTransform.m03}, {baseTransform.m13}, {baseTransform.m23})";
+
+                Handles.Label(Vector3.zero + Vector3.up * 2f, debugInfo, new GUIStyle {
+                    normal = new GUIStyleState { textColor = Color.white },
+                    fontSize = 11,
+                    alignment = TextAnchor.UpperLeft
+                });
+#endif
+
+                // Extract rotation columns from the transformation matrix (in FLU space)
+                Vector3 baseXAxisFLU = new Vector3(accumulatedTransformFLU.m00, accumulatedTransformFLU.m10, accumulatedTransformFLU.m20);
+                Vector3 baseYAxisFLU = new Vector3(accumulatedTransformFLU.m01, accumulatedTransformFLU.m11, accumulatedTransformFLU.m21);
+                Vector3 baseZAxisFLU = new Vector3(accumulatedTransformFLU.m02, accumulatedTransformFLU.m12, accumulatedTransformFLU.m22);
+
+                // Convert axes from FLU to Unity
+                Vector3 baseXAxis = FLUToUnity(baseXAxisFLU);
+                Vector3 baseYAxis = FLUToUnity(baseYAxisFLU);
+                Vector3 baseZAxis = FLUToUnity(baseZAxisFLU);
 
                 // Draw sphere at base frame origin
                 Gizmos.color = Color.cyan;
                 Gizmos.DrawWireSphere(basePosition, gizmoSize);
 
-                // Draw base frame axes (X=red, Y=green, Z=blue)
-                Vector3 baseXAxis = robot.transform.right * gizmoSize * 2;
-                Vector3 baseYAxis = robot.transform.up * gizmoSize * 2;
-                Vector3 baseZAxis = robot.transform.forward * gizmoSize * 2;
-
                 Gizmos.color = Color.red;
-                Gizmos.DrawLine(basePosition, basePosition + baseXAxis);
+                Gizmos.DrawLine(basePosition, basePosition + baseXAxis * gizmoSize * 1.5f);
                 Gizmos.color = Color.green;
-                Gizmos.DrawLine(basePosition, basePosition + baseYAxis);
+                Gizmos.DrawLine(basePosition, basePosition + baseYAxis * gizmoSize * 1.5f);
                 Gizmos.color = Color.blue;
-                Gizmos.DrawLine(basePosition, basePosition + baseZAxis);
+                Gizmos.DrawLine(basePosition, basePosition + baseZAxis * gizmoSize * 1.5f);
 
 #if UNITY_EDITOR
                 Handles.Label(basePosition + Vector3.up * gizmoSize * 0.3f, "Base", new GUIStyle {
@@ -219,30 +375,44 @@ namespace Unity.Robotics.UrdfImporter.Control{
 #endif
 
                 // Draw intermediate frames for each joint
-                if (dh != null && dh.Count == jointChain.Count && dh.Count > 0)
+                if (dh != null && dh.Count > 0)
                 {
-                    Matrix4x4 accumulatedTransform = Matrix4x4.identity;
+                    // Perform FK calculations in FLU (ROS) coordinate space
+                    // Start with base frame transformation
+                    List<float[]> dhWithJoints = PopulateDHparameters(currentJointParameters());
 
-                    for (int i = 0; i < dh.Count; i++)
+                    for (int i = 0; i < dhWithJoints.Count; i++)
                     {
-                        // Compute FK up to joint i
-                        accumulatedTransform = accumulatedTransform * FWDMatrix2(dh[i]).transpose;
+                        // Compute FK up to joint i in FLU space
+                        accumulatedTransformFLU = accumulatedTransformFLU * FWDMatrix2(dhWithJoints[i]).transpose;
 
-                        // Extract position and orientation
-                        Vector3 framePositionLocal = new Vector3(accumulatedTransform.m03, accumulatedTransform.m13, accumulatedTransform.m23);
-                        Vector3 framePosition = robot.transform.TransformPoint(framePositionLocal);
+                        // Extract position in FLU coordinate space
+                        Vector3 framePositionFLU = new Vector3(
+                            accumulatedTransformFLU.m03,
+                            accumulatedTransformFLU.m13,
+                            accumulatedTransformFLU.m23
+                        );
 
-                        Vector3 xAxis = robot.transform.TransformDirection((Vector3)accumulatedTransform.GetColumn(0));
-                        Vector3 yAxis = robot.transform.TransformDirection((Vector3)accumulatedTransform.GetColumn(1));
-                        Vector3 zAxis = robot.transform.TransformDirection((Vector3)accumulatedTransform.GetColumn(2));
+                        // Convert from FLU to Unity coordinates
+                        Vector3 framePosition = FLUToUnity(framePositionFLU);
+
+                        // Extract rotation columns from the transformation matrix
+                        // GetColumn extracts the rotated basis vectors
+                        Vector3 xAxisFLU = new Vector3(accumulatedTransformFLU.m00, accumulatedTransformFLU.m10, accumulatedTransformFLU.m20);
+                        Vector3 yAxisFLU = new Vector3(accumulatedTransformFLU.m01, accumulatedTransformFLU.m11, accumulatedTransformFLU.m21);
+                        Vector3 zAxisFLU = new Vector3(accumulatedTransformFLU.m02, accumulatedTransformFLU.m12, accumulatedTransformFLU.m22);
+
+                        Vector3 xAxis = FLUToUnity(xAxisFLU);
+                        Vector3 yAxis = FLUToUnity(yAxisFLU);
+                        Vector3 zAxis = FLUToUnity(zAxisFLU);
 
                         // Draw coordinate axes
                         Gizmos.color = Color.red;
-                        Gizmos.DrawLine(framePosition, framePosition + xAxis * gizmoSize * 1.5f);
+                        Gizmos.DrawLine(framePosition, framePosition + xAxis * gizmoSize);
                         Gizmos.color = Color.green;
-                        Gizmos.DrawLine(framePosition, framePosition + yAxis * gizmoSize * 1.5f);
+                        Gizmos.DrawLine(framePosition, framePosition + yAxis * gizmoSize);
                         Gizmos.color = Color.blue;
-                        Gizmos.DrawLine(framePosition, framePosition + zAxis * gizmoSize * 1.5f);
+                        Gizmos.DrawLine(framePosition, framePosition + zAxis * gizmoSize);
 
 #if UNITY_EDITOR
                         // Draw frame number label
@@ -255,22 +425,30 @@ namespace Unity.Robotics.UrdfImporter.Control{
                 }
 
                 // Draw end-effector frame with wire sphere
-                if (endEffectorPosition != Matrix4x4.zero)
+                if (endEffectorPosition != Matrix4x4.zero && jointChain.Count > 0)
                 {
-                    // FK position in base frame coordinates
-                    Vector3 fkPositionLocal = new Vector3(endEffectorPosition.m03, endEffectorPosition.m13, endEffectorPosition.m23);
+                    // FK position in FLU coordinate space
+                    Vector3 fkPositionFLU = new Vector3(
+                        endEffectorPosition.m03,
+                        endEffectorPosition.m13,
+                        endEffectorPosition.m23
+                    );
 
-                    // Convert to world space
-                    Vector3 fkPosition = robot.transform.TransformPoint(fkPositionLocal);
+                    // Convert from FLU to Unity coordinates
+                    Vector3 fkPosition = FLUToUnity(fkPositionFLU);
 
                     // Draw sphere at FK end effector position
                     Gizmos.color = Color.yellow;
                     Gizmos.DrawWireSphere(fkPosition, gizmoSize);
 
-                    // Draw coordinate frame axes (X=red, Y=green, Z=blue)
-                    Vector3 xAxis = robot.transform.TransformDirection((Vector3)endEffectorPosition.GetColumn(0));
-                    Vector3 yAxis = robot.transform.TransformDirection((Vector3)endEffectorPosition.GetColumn(1));
-                    Vector3 zAxis = robot.transform.TransformDirection((Vector3)endEffectorPosition.GetColumn(2));
+                    // Extract and convert orientation axes from FLU to Unity
+                    Vector3 xAxisFLU = (Vector3)endEffectorPosition.GetColumn(0);
+                    Vector3 yAxisFLU = (Vector3)endEffectorPosition.GetColumn(1);
+                    Vector3 zAxisFLU = (Vector3)endEffectorPosition.GetColumn(2);
+
+                    Vector3 xAxis = FLUToUnity(xAxisFLU);
+                    Vector3 yAxis = FLUToUnity(yAxisFLU);
+                    Vector3 zAxis = FLUToUnity(zAxisFLU);
 
                     Gizmos.color = Color.red;
                     Gizmos.DrawLine(fkPosition, fkPosition + xAxis * gizmoSize * 2);
@@ -320,32 +498,6 @@ namespace Unity.Robotics.UrdfImporter.Control{
             return true;
         }
 
-        /// <summary>
-        /// Automatically populates DH parameters by extracting them from the ArticulationBody joint chain.
-        /// </summary>
-        public void AutoPopulateDHParameters()
-        {
-            if (jointChain == null || jointChain.Count == 0)
-            {
-                Debug.LogError("FKRobot: Cannot auto-populate DH parameters - joint chain is empty");
-                return;
-            }
-
-            // Initialize dh list with proper size
-            dh = new List<float[]>();
-            for (int i = 0; i < jointChain.Count; i++)
-                dh.Add(new float[4]); // [α, a, θ, d]
-
-            // Extract DH parameters using utility class
-            DHParameterExtractor.ExtractDHParameters(jointChain, dh);
-
-            // Validate and log results
-            if (ValidateDHParameters())
-            {
-                Debug.Log($"FKRobot: Successfully computed DH parameters for {dh.Count} joints");
-                LogDHParameters();
-            }
-        }
 
         /// <summary>
         /// Validates that computed DH parameters contain no invalid values.

@@ -35,7 +35,6 @@ namespace Unity.Robotics.UrdfImporter.Editor
             serializedObject.Update();
 
             // DH Parameter Configuration
-            EditorGUILayout.PropertyField(autoComputeDH);
             EditorGUILayout.PropertyField(dhParametersAsset);
 
             GUILayout.Space(10);
@@ -56,8 +55,7 @@ namespace Unity.Robotics.UrdfImporter.Editor
             GUILayout.Space(10);
 
             // Manual DH Parameter Entry
-            bool disableManualEntry = fkrobot.autoComputeDH || fkrobot.dhParametersAsset != null;
-            EditorGUI.BeginDisabledGroup(disableManualEntry);
+            EditorGUI.BeginDisabledGroup(fkrobot.dhParametersAsset != null);
             if (GUILayout.Button("Add DH Parameters Manually"))
             {
                 AddDhParameterWindow window = (AddDhParameterWindow)EditorWindow.GetWindow(typeof(AddDhParameterWindow));
@@ -67,11 +65,6 @@ namespace Unity.Robotics.UrdfImporter.Editor
                 window.Show();
             }
             EditorGUI.EndDisabledGroup();
-
-            if (disableManualEntry)
-            {
-                EditorGUILayout.HelpBox("Manual entry is disabled when Auto Compute DH or DH Parameters Asset is set.", MessageType.Info);
-            }
         }
 
 
