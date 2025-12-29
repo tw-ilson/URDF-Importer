@@ -147,14 +147,14 @@ namespace Unity.Robotics.UrdfImporter.Control{
         {
             currentAngles = currentJointParameters();
 
-            List<float[]> dhWithJoints;
+            List<float> jointAngles;
             if (angles == null)
             {
-                dhWithJoints = PopulateDHparameters(currentAngles);
+                jointAngles = currentAngles;
             }
             else
             {
-                dhWithJoints = PopulateDHparameters(angles);
+                jointAngles = angles;
             }
 
             // Use first articulation body as base position for FK calculations
@@ -164,9 +164,11 @@ namespace Unity.Robotics.UrdfImporter.Control{
 
             endEffectorPosition = baseTransform;
 
-            for (int i = 0; i < dhWithJoints.Count; i++)
+            int count = Math.Min(dh.Count, jointAngles.Count);
+            for (int i = 0; i < count; i++)
             {
-                endEffectorPosition = endEffectorPosition * (FWDMatrix2(dhWithJoints[i]).transpose);
+                float jointAngle = jointAngles[i];
+                endEffectorPosition = endEffectorPosition * FWDMatrix2(dh[i], jointAngle);
             }
 
             return endEffectorPosition;
@@ -242,17 +244,33 @@ namespace Unity.Robotics.UrdfImporter.Control{
         }
 
         /// <summary>
-        /// Returns a homogenous transformatino matrix formed using a set of DH paramters of a joint in new DH convention.
+        /// Returns a homogenous transformation matrix formed using a set of DH parameters of a joint in modified DH convention.
+        /// The joint angle is added to the theta parameter (DHparameters[2]) for revolute joints.
         /// https://en.wikipedia.org/wiki/Denavit–Hartenberg_parameters
         /// </summary>
-        /// <param name="DHparameters">Array of four float parameters</param>
-        /// <returns></returns>
-        private Matrix4x4 FWDMatrix2(float[] DHparameters)
+        /// <param name="DHparameters">Array of four float parameters [alpha, a, theta, d]</param>
+        /// <param name="jointAngle">Joint angle to add to theta (for revolute joints) or d (for prismatic joints)</param>
+        /// <returns>Transformation matrix</returns>
+        public Matrix4x4 FWDMatrix2(float[] DHparameters, float jointAngle)
         {
-            return new Matrix4x4(new Vector4(Mathf.Cos(DHparameters[2]), -Mathf.Sin(DHparameters[2]) * Mathf.Cos(DHparameters[0]), Mathf.Sin(DHparameters[2]) * Mathf.Sin(DHparameters[0]), DHparameters[1] * Mathf.Cos(DHparameters[2])),
-                                new Vector4(Mathf.Sin(DHparameters[2]) , Mathf.Cos(DHparameters[2]) * Mathf.Cos(DHparameters[0]), -Mathf.Sin(DHparameters[0]) * Mathf.Cos(DHparameters[2]), Mathf.Sin(DHparameters[2]) * DHparameters[1]),
-                                new Vector4(0, Mathf.Sin(DHparameters[0]), Mathf.Cos(DHparameters[0]), DHparameters[3]),
-                                new Vector4(0, 0, 0, 1));
+            float theta = DHparameters[2] + jointAngle;
+            float alpha = DHparameters[0];
+            float a = DHparameters[1];
+            float d = DHparameters[3];
+
+            float cosTheta = Mathf.Cos(theta);
+            float sinTheta = Mathf.Sin(theta);
+            float cosAlpha = Mathf.Cos(alpha);
+            float sinAlpha = Mathf.Sin(alpha);
+
+            Matrix4x4 T = new Matrix4x4(
+                new Vector4(cosTheta, -sinTheta * cosAlpha, sinTheta * sinAlpha, a * cosTheta),
+                new Vector4(sinTheta, cosTheta * cosAlpha, -sinAlpha * cosTheta, sinTheta * a),
+                new Vector4(0, sinAlpha, cosAlpha, d),
+                new Vector4(0, 0, 0, 1)
+            );
+
+            return T.transpose;
         }
 
         /// <summary>
@@ -379,12 +397,14 @@ namespace Unity.Robotics.UrdfImporter.Control{
                 {
                     // Perform FK calculations in FLU (ROS) coordinate space
                     // Start with base frame transformation
-                    List<float[]> dhWithJoints = PopulateDHparameters(currentJointParameters());
+                    List<float> jointAngles = currentJointParameters();
 
-                    for (int i = 0; i < dhWithJoints.Count; i++)
+                    int count = Math.Min(dh.Count, jointAngles.Count);
+                    for (int i = 0; i < count; i++)
                     {
                         // Compute FK up to joint i in FLU space
-                        accumulatedTransformFLU = accumulatedTransformFLU * FWDMatrix2(dhWithJoints[i]).transpose;
+                        float jointAngle = jointAngles[i];
+                        accumulatedTransformFLU = accumulatedTransformFLU * FWDMatrix2(dh[i], jointAngle);
 
                         // Extract position in FLU coordinate space
                         Vector3 framePositionFLU = new Vector3(
@@ -422,48 +442,48 @@ namespace Unity.Robotics.UrdfImporter.Control{
                         });
 #endif
                     }
-                }
 
-                // Draw end-effector frame with wire sphere
-                if (endEffectorPosition != Matrix4x4.zero && jointChain.Count > 0)
-                {
-                    // FK position in FLU coordinate space
-                    Vector3 fkPositionFLU = new Vector3(
-                        endEffectorPosition.m03,
-                        endEffectorPosition.m13,
-                        endEffectorPosition.m23
-                    );
+                    // Draw end-effector frame using accumulated transform (consistent with intermediate frames)
+                    if (count > 0)
+                    {
+                        // FK position in FLU coordinate space (use accumulated transform)
+                        Vector3 fkPositionFLU = new Vector3(
+                            accumulatedTransformFLU.m03,
+                            accumulatedTransformFLU.m13,
+                            accumulatedTransformFLU.m23
+                        );
 
-                    // Convert from FLU to Unity coordinates
-                    Vector3 fkPosition = FLUToUnity(fkPositionFLU);
+                        // Convert from FLU to Unity coordinates
+                        Vector3 fkPosition = FLUToUnity(fkPositionFLU);
 
-                    // Draw sphere at FK end effector position
-                    Gizmos.color = Color.yellow;
-                    Gizmos.DrawWireSphere(fkPosition, gizmoSize);
+                        // Draw sphere at FK end effector position
+                        Gizmos.color = Color.yellow;
+                        Gizmos.DrawWireSphere(fkPosition, gizmoSize);
 
-                    // Extract and convert orientation axes from FLU to Unity
-                    Vector3 xAxisFLU = (Vector3)endEffectorPosition.GetColumn(0);
-                    Vector3 yAxisFLU = (Vector3)endEffectorPosition.GetColumn(1);
-                    Vector3 zAxisFLU = (Vector3)endEffectorPosition.GetColumn(2);
+                        // Extract and convert orientation axes from FLU to Unity
+                        Vector3 xAxisFLU = new Vector3(accumulatedTransformFLU.m00, accumulatedTransformFLU.m10, accumulatedTransformFLU.m20);
+                        Vector3 yAxisFLU = new Vector3(accumulatedTransformFLU.m01, accumulatedTransformFLU.m11, accumulatedTransformFLU.m21);
+                        Vector3 zAxisFLU = new Vector3(accumulatedTransformFLU.m02, accumulatedTransformFLU.m12, accumulatedTransformFLU.m22);
 
-                    Vector3 xAxis = FLUToUnity(xAxisFLU);
-                    Vector3 yAxis = FLUToUnity(yAxisFLU);
-                    Vector3 zAxis = FLUToUnity(zAxisFLU);
+                        Vector3 xAxis = FLUToUnity(xAxisFLU);
+                        Vector3 yAxis = FLUToUnity(yAxisFLU);
+                        Vector3 zAxis = FLUToUnity(zAxisFLU);
 
-                    Gizmos.color = Color.red;
-                    Gizmos.DrawLine(fkPosition, fkPosition + xAxis * gizmoSize * 2);
-                    Gizmos.color = Color.green;
-                    Gizmos.DrawLine(fkPosition, fkPosition + yAxis * gizmoSize * 2);
-                    Gizmos.color = Color.blue;
-                    Gizmos.DrawLine(fkPosition, fkPosition + zAxis * gizmoSize * 2);
+                        Gizmos.color = Color.red;
+                        Gizmos.DrawLine(fkPosition, fkPosition + xAxis * gizmoSize * 2);
+                        Gizmos.color = Color.green;
+                        Gizmos.DrawLine(fkPosition, fkPosition + yAxis * gizmoSize * 2);
+                        Gizmos.color = Color.blue;
+                        Gizmos.DrawLine(fkPosition, fkPosition + zAxis * gizmoSize * 2);
 
 #if UNITY_EDITOR
-                    Handles.Label(fkPosition + Vector3.up * gizmoSize * 0.3f, "End-Effector", new GUIStyle {
-                        normal = new GUIStyleState { textColor = Color.yellow },
-                        fontSize = 12,
-                        fontStyle = FontStyle.Bold
-                    });
+                        Handles.Label(fkPosition + Vector3.up * gizmoSize * 0.3f, "End-Effector", new GUIStyle {
+                            normal = new GUIStyleState { textColor = Color.yellow },
+                            fontSize = 12,
+                            fontStyle = FontStyle.Bold
+                        });
 #endif
+                    }
                 }
             }
         }
